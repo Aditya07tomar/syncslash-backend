@@ -1,0 +1,21 @@
+databases:
+  - name: syncslash-db
+    plan: free
+    databaseName: optimizer_db
+
+services:
+  - type: web
+    name: syncslash-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: syncslash-db
+          property: connectionString
+      - key: JWT_SECRET
+        value: tomar123
+      - key: GOOGLE_WEB_CLIENT_ID
+        value: 652174449722-sihsgdr8efdob8idg3p9sjdn4es0s5s8.apps.googleusercontent.com

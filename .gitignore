@@ -1,0 +1,10 @@
+venv/
+backend/venv/
+backend/b3_payment_service/venv/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.DS_Store
