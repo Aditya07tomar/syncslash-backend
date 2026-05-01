@@ -11,11 +11,6 @@ Endpoints:
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from backend.db.connection import run_query
-from backend.b2_analytics.graph_builder import (
-    calculate_redundancy,
-    get_full_graph,
-    sync_user_graph
-)
 
 router = APIRouter(
     prefix="/analytics",
@@ -100,27 +95,71 @@ def get_ghost_subscriptions(user_id: int):
 
 # ──────────────────────────────────────────────────────────────
 # GET /analytics/redundancy/{user_id}
-# Uses Neo4j Knowledge Graph for overlap detection
+# Detects overlapping subscriptions using PostgreSQL
 # ──────────────────────────────────────────────────────────────
 @router.get("/redundancy/{user_id}")
 def get_redundancy_analysis(user_id: int):
     """
-    Analyzes the user's subscription graph in Neo4j to detect
-    redundant/overlapping subscriptions within the same category.
-    Example output:
-      "You have 3 Streaming services (Netflix, Amazon Prime,
-       Disney+) costing ₹1247/mo. Consider keeping only Netflix
-       to save ₹598/mo."
+    Detects redundant/overlapping subscriptions within the same
+    category using PostgreSQL GROUP BY. No Neo4j needed.
     """
     try:
-        result = calculate_redundancy(user_id)
+        # Find categories with 2+ active subscriptions
+        rows = run_query("""
+            SELECT s2.category,
+                   COUNT(*) as service_count,
+                   SUM(s.detected_cost) as total_cost,
+                   json_agg(json_build_object(
+                       'name', s2.service_name,
+                       'cost', s.detected_cost,
+                       'usage_count', COALESCE(s.usage_count, 0)
+                   )) as services
+            FROM Subscriptions s
+            JOIN Services s2 ON s.service_id = s2.service_id
+            WHERE s.user_id = %s AND s.status = 'active'
+            GROUP BY s2.category
+            HAVING COUNT(*) >= 2
+            ORDER BY SUM(s.detected_cost) DESC
+        """, params=(user_id,))
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Knowledge Graph error: {str(e)}. Is Neo4j running?"
-        )
+        raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
 
-    return result
+    if not rows:
+        return {
+            "user_id": user_id,
+            "has_redundancy": False,
+            "overlaps": [],
+            "total_potential_savings": 0
+        }
+
+    overlaps = []
+    total_savings = 0
+    for row in rows:
+        services = row['services'] if isinstance(row['services'], list) else []
+        # Find most used service (keep it, cancel others)
+        most_used = max(services, key=lambda s: s.get('usage_count', 0)) if services else None
+        cheapest_cost = min(s['cost'] for s in services) if services else 0
+        total_cat_cost = sum(s['cost'] for s in services)
+        savings = total_cat_cost - cheapest_cost
+
+        overlaps.append({
+            "category": row['category'],
+            "overlap_count": row['service_count'],
+            "total_cost": total_cat_cost,
+            "services": services,
+            "most_used_service": most_used['name'] if most_used else None,
+            "potential_savings": savings,
+            "recommendation": f"You have {row['service_count']} {row['category']} services. "
+                            f"Keep {most_used['name'] if most_used else 'one'} and save ₹{savings:.0f}/mo."
+        })
+        total_savings += savings
+
+    return {
+        "user_id": user_id,
+        "has_redundancy": True,
+        "overlaps": overlaps,
+        "total_potential_savings": total_savings
+    }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -171,26 +210,83 @@ def get_monthly_report(user_id: int):
 
 # ──────────────────────────────────────────────────────────────
 # GET /analytics/graph/{user_id}
-# Returns graph data for frontend visualization (D3/vis.js)
+# Returns graph data built from PostgreSQL (no Neo4j needed)
 # ──────────────────────────────────────────────────────────────
 @router.get("/graph/{user_id}")
 def get_graph_data(user_id: int):
     """
-    Returns the full knowledge graph structure (nodes + edges)
-    for a user's subscriptions. Designed for rendering with
-    D3.js or vis.js on the frontend.
+    Builds a knowledge graph structure from PostgreSQL data.
+    Returns nodes (user, services, categories) and edges
+    for frontend visualization.
     """
     try:
-        graph = get_full_graph(user_id)
+        # Get user info
+        users = run_query("SELECT user_id, name FROM Users WHERE user_id = %s", params=(user_id,))
+        user_name = users[0]['name'] if users else f"User {user_id}"
+
+        # Get subscriptions with service details
+        subs = run_query("""
+            SELECT s.sub_id, s.detected_cost, s.status,
+                   COALESCE(s.usage_count, 0) as usage_count,
+                   s2.service_name, s2.category, s2.service_id
+            FROM Subscriptions s
+            JOIN Services s2 ON s.service_id = s2.service_id
+            WHERE s.user_id = %s
+            ORDER BY s2.category, s2.service_name
+        """, params=(user_id,))
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Knowledge Graph error: {str(e)}. Is Neo4j running?"
-        )
+        raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
+
+    nodes = []
+    edges = []
+
+    # User node
+    user_node_id = f"user_{user_id}"
+    nodes.append({"id": user_node_id, "label": user_name, "type": "user"})
+
+    # Track categories to avoid duplicates
+    categories_added = set()
+
+    for sub in subs:
+        service_id = f"svc_{sub['service_id']}"
+        category_id = f"cat_{sub['category']}"
+
+        # Service node
+        nodes.append({
+            "id": service_id,
+            "label": sub['service_name'],
+            "type": "service",
+            "cost": float(sub['detected_cost']) if sub['detected_cost'] else 0
+        })
+
+        # Category node (only once per category)
+        if sub['category'] not in categories_added:
+            nodes.append({"id": category_id, "label": sub['category'], "type": "category"})
+            categories_added.add(sub['category'])
+
+        # User → Service edge
+        edges.append({
+            "from": user_node_id,
+            "to": service_id,
+            "label": "SUBSCRIBED_TO",
+            "cost": float(sub['detected_cost']) if sub['detected_cost'] else 0,
+            "status": sub['status'],
+            "usage": sub['usage_count']
+        })
+
+        # Service → Category edge
+        edges.append({
+            "from": service_id,
+            "to": category_id,
+            "label": "BELONGS_TO"
+        })
 
     return {
         "user_id": user_id,
-        "graph": graph
+        "graph": {
+            "nodes": nodes,
+            "edges": edges
+        }
     }
 
 
