@@ -472,6 +472,121 @@ def unfreeze_subscription(sub_id: int, req: SubFreezeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── C++ Settlement Engine Integration ──
+# Uses the compiled pybind11 module for Minimum Cash Flow optimization
+
+import sys as _sys
+import os as _os
+_cpp_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "cpp_engine-P2P")
+if _cpp_path not in _sys.path:
+    _sys.path.insert(0, _cpp_path)
+
+from settlement_wrapper import settle_debts_as_dicts, CPP_AVAILABLE
+
+@app.get("/settlement/engine-status", tags=["C++ Engine"])
+def settlement_engine_status():
+    """Check if the C++ settlement engine is loaded."""
+    return {
+        "cpp_engine_loaded": CPP_AVAILABLE,
+        "engine": "C++ pybind11 (O3 optimized)" if CPP_AVAILABLE else "Python fallback",
+        "algorithm": "Minimum Cash Flow — Greedy"
+    }
+
+
+@app.get("/settlement/optimize/{group_id}", tags=["C++ Engine"])
+def optimize_group_settlement(group_id: int):
+    """
+    Fetches group members + subscription cost, calculates each member's
+    share, then runs the C++ Minimum Cash Flow algorithm to produce
+    the minimum number of transactions to settle all debts.
+    
+    Flow:
+      1. Get group details (subscription cost, creator)
+      2. Get all members
+      3. Calculate per-person share = total_cost / member_count
+      4. Creator paid full amount → positive balance
+      5. Others owe their share → negative balance
+      6. Feed into C++ engine → optimal transactions
+    """
+    try:
+        # Get group with linked subscription cost
+        group_rows = run_query("""
+            SELECT sg.group_id, sg.name, sg.creator_id, sg.sub_id,
+                   COALESCE(s.detected_cost, 0) as total_cost,
+                   u.name as creator_name
+            FROM Subscription_Groups sg
+            LEFT JOIN Subscriptions s ON sg.sub_id = s.sub_id
+            LEFT JOIN Users u ON sg.creator_id = u.user_id
+            WHERE sg.group_id = %s
+        """, params=(group_id,))
+
+        if not group_rows:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        group = group_rows[0]
+        total_cost = float(group['total_cost'])
+        creator_id = group['creator_id']
+        creator_name = group['creator_name'] or f"User {creator_id}"
+
+        # Get all members
+        members = run_query("""
+            SELECT gm.user_id, u.name
+            FROM Group_Members gm
+            JOIN Users u ON gm.user_id = u.user_id
+            WHERE gm.group_id = %s
+        """, params=(group_id,))
+
+        # Include creator if not already in members list
+        member_ids = {m['user_id'] for m in members}
+        if creator_id not in member_ids:
+            members.insert(0, {"user_id": creator_id, "name": creator_name})
+
+        member_count = len(members)
+        if member_count <= 1:
+            return {
+                "group_id": group_id,
+                "group_name": group['name'],
+                "total_cost": total_cost,
+                "member_count": member_count,
+                "per_person_share": total_cost,
+                "transactions": [],
+                "message": "Only one member — no settlements needed."
+            }
+
+        per_person = round(total_cost / member_count, 2)
+
+        # Build net balances: creator is owed, others owe
+        net_balances = {}
+        for m in members:
+            name = m['name'] or f"User {m['user_id']}"
+            if m['user_id'] == creator_id:
+                # Creator paid full, is owed (total - their share)
+                net_balances[name] = round(total_cost - per_person, 2)
+            else:
+                # Others owe their share (negative balance)
+                net_balances[name] = round(-per_person, 2)
+
+        # Run C++ Minimum Cash Flow algorithm
+        transactions = settle_debts_as_dicts(net_balances)
+
+        return {
+            "group_id": group_id,
+            "group_name": group['name'],
+            "total_cost": total_cost,
+            "member_count": member_count,
+            "per_person_share": per_person,
+            "engine": "C++ pybind11" if CPP_AVAILABLE else "Python fallback",
+            "net_balances": net_balances,
+            "transactions": transactions,
+            "message": f"Optimized into {len(transactions)} transaction(s) using Minimum Cash Flow algorithm."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/")
 def root():
     
