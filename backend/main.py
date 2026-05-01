@@ -13,16 +13,12 @@ from backend.b1_ingestion.routes import router as b1_router
 from backend.auth.routes import router as auth_router # Added for Google Auth
 from backend.b2_analytics.routes import router as b2_router  # Analytics Engine
 
-# FastAPI() creates the application instance.
-# title and version appear in the auto-generated docs page
-# at localhost:8000/docs — this is what you show your professor.
 app = FastAPI(
     title="Subscription Fatigue Optimizer API",
     version="1.0.0",
     description="DBMS Project — IIIT Allahabad"
 )
 
-# CRITICAL: CORS configuration allows your Flutter emulator to communicate with Python
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  
@@ -37,12 +33,11 @@ def on_startup():
     from backend.init_db import init_database
     init_database()
 
-# Include all module routers
 app.include_router(b1_router)
-app.include_router(auth_router) # Included the new auth router
-app.include_router(b2_router)   # B2 Analytics Engine
+app.include_router(auth_router)
+app.include_router(b2_router)
 
-# ── B3 Payment + Virtual Card routes (integrated into main server) ──
+
 from backend.db.connection import run_query
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -58,7 +53,6 @@ class SimulatePaymentRequest(BaseModel):
 
 @app.post("/virtualcard/create", tags=["B3 — Payments"])
 def create_virtual_card(req: CreateCardRequest):
-    """Create a virtual card for a subscription."""
     try:
         card_number = "VC-" + str(uuid.uuid4())[:12].upper()
         run_query(
@@ -86,7 +80,6 @@ def create_virtual_card(req: CreateCardRequest):
 
 @app.get("/virtualcards/{user_id}", tags=["B3 — Payments"])
 def get_user_cards(user_id: int):
-    """Get all virtual cards for a user."""
     try:
         rows = run_query("""
             SELECT vc.card_id, vc.card_number, vc.status, vc.created_at,
@@ -102,9 +95,8 @@ def get_user_cards(user_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/virtualcard/{card_id}/freeze", tags=["B3 — Payments"])
-def freeze_card(card_id: int):
-    """Freeze a virtual card (kill switch)."""
+@app.post("/virtualcards/{card_id}/freeze", tags=["B3 — Payments"])
+def freeze_virtual_card(card_id: int):
     try:
         result = run_query(
             "UPDATE Virtual_Cards SET status = 'frozen' WHERE card_id = %s RETURNING card_id",
@@ -113,7 +105,6 @@ def freeze_card(card_id: int):
         )
         if not result:
             raise HTTPException(status_code=404, detail="Card not found")
-        # Also update linked subscription status
         run_query(
             "UPDATE Subscriptions SET status = 'frozen' WHERE virtual_card_id = %s",
             params=(card_id,),
@@ -126,9 +117,8 @@ def freeze_card(card_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/virtualcard/{card_id}/unfreeze", tags=["B3 — Payments"])
-def unfreeze_card(card_id: int):
-    """Unfreeze a virtual card."""
+@app.post("/virtualcards/{card_id}/unfreeze", tags=["B3 — Payments"])
+def unfreeze_virtual_card(card_id: int):
     try:
         result = run_query(
             "UPDATE Virtual_Cards SET status = 'active' WHERE card_id = %s RETURNING card_id",
@@ -149,11 +139,9 @@ def unfreeze_card(card_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/virtualcard/{card_id}", tags=["B3 — Payments"])
-def cancel_card(card_id: int):
-    """Cancel (delete) a virtual card."""
+@app.delete("/virtualcards/{card_id}", tags=["B3 — Payments"])
+def cancel_virtual_card(card_id: int):
     try:
-        # Unlink from subscription first
         run_query(
             "UPDATE Subscriptions SET virtual_card_id = NULL WHERE virtual_card_id = %s",
             params=(card_id,),
@@ -175,7 +163,6 @@ def cancel_card(card_id: int):
 
 @app.post("/payments/simulate", tags=["B3 — Payments"])
 def simulate_payment(req: SimulatePaymentRequest):
-    """Simulate a payment charge on a virtual card."""
     try:
         rows = run_query(
             "SELECT status FROM Virtual_Cards WHERE card_number = %s",
@@ -206,7 +193,6 @@ class SettleBillRequest(BaseModel):
 
 @app.get("/p2p/balances/{user_id}", tags=["P2P — Shared Bills"])
 def get_p2p_balances(user_id: int):
-    """Get all pending P2P balances for a user."""
     try:
         # Money others owe this user
         owes_you = run_query("""
@@ -251,7 +237,6 @@ def get_p2p_balances(user_id: int):
 
 @app.post("/p2p/create", tags=["P2P — Shared Bills"])
 def create_shared_bill(req: CreateBillRequest):
-    """Create a new shared bill / P2P request."""
     try:
         run_query(
             """INSERT INTO Shared_Bills (sub_id, payer_id, debtor_id, amount_owed, due_date, status)
