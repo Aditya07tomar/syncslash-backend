@@ -112,7 +112,7 @@ def get_redundancy_analysis(user_id: int):
                    json_agg(json_build_object(
                        'name', s2.service_name,
                        'cost', s.detected_cost,
-                       'usage_count', COALESCE(s.usage_count, 0)
+                       'usage_count', 0
                    )) as services
             FROM Subscriptions s
             JOIN Services s2 ON s.service_id = s2.service_id
@@ -227,7 +227,6 @@ def get_graph_data(user_id: int):
         # Get subscriptions with service details
         subs = run_query("""
             SELECT s.sub_id, s.detected_cost, s.status,
-                   COALESCE(s.usage_count, 0) as usage_count,
                    s2.service_name, s2.category, s2.service_id
             FROM Subscriptions s
             JOIN Services s2 ON s.service_id = s2.service_id
@@ -271,7 +270,7 @@ def get_graph_data(user_id: int):
             "label": "SUBSCRIBED_TO",
             "cost": float(sub['detected_cost']) if sub['detected_cost'] else 0,
             "status": sub['status'],
-            "usage": sub['usage_count']
+            "usage": 0
         })
 
         # Service → Category edge
