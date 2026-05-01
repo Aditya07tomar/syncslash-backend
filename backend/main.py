@@ -13,12 +13,16 @@ from backend.b1_ingestion.routes import router as b1_router
 from backend.auth.routes import router as auth_router # Added for Google Auth
 from backend.b2_analytics.routes import router as b2_router  # Analytics Engine
 
+# FastAPI() creates the application instance.
+# title and version appear in the auto-generated docs page
+# at localhost:8000/docs — this is what you show your professor.
 app = FastAPI(
     title="Subscription Fatigue Optimizer API",
     version="1.0.0",
     description="DBMS Project — IIIT Allahabad"
 )
 
+# CRITICAL: CORS configuration allows your Flutter emulator to communicate with Python
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  
@@ -33,11 +37,12 @@ def on_startup():
     from backend.init_db import init_database
     init_database()
 
+# Include all module routers
 app.include_router(b1_router)
-app.include_router(auth_router)
-app.include_router(b2_router)
+app.include_router(auth_router) # Included the new auth router
+app.include_router(b2_router)   # B2 Analytics Engine
 
-
+# ── B3 Payment + Virtual Card routes (integrated into main server) ──
 from backend.db.connection import run_query
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -53,6 +58,7 @@ class SimulatePaymentRequest(BaseModel):
 
 @app.post("/virtualcard/create", tags=["B3 — Payments"])
 def create_virtual_card(req: CreateCardRequest):
+    """Create a virtual card for a subscription."""
     try:
         card_number = "VC-" + str(uuid.uuid4())[:12].upper()
         run_query(
@@ -80,6 +86,7 @@ def create_virtual_card(req: CreateCardRequest):
 
 @app.get("/virtualcards/{user_id}", tags=["B3 — Payments"])
 def get_user_cards(user_id: int):
+    """Get all virtual cards for a user."""
     try:
         rows = run_query("""
             SELECT vc.card_id, vc.card_number, vc.status, vc.created_at,
@@ -95,8 +102,9 @@ def get_user_cards(user_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/virtualcards/{card_id}/freeze", tags=["B3 — Payments"])
-def freeze_virtual_card(card_id: int):
+@app.post("/virtualcard/{card_id}/freeze", tags=["B3 — Payments"])
+def freeze_card(card_id: int):
+    """Freeze a virtual card (kill switch)."""
     try:
         result = run_query(
             "UPDATE Virtual_Cards SET status = 'frozen' WHERE card_id = %s RETURNING card_id",
@@ -105,6 +113,7 @@ def freeze_virtual_card(card_id: int):
         )
         if not result:
             raise HTTPException(status_code=404, detail="Card not found")
+        # Also update linked subscription status
         run_query(
             "UPDATE Subscriptions SET status = 'frozen' WHERE virtual_card_id = %s",
             params=(card_id,),
@@ -117,8 +126,9 @@ def freeze_virtual_card(card_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/virtualcards/{card_id}/unfreeze", tags=["B3 — Payments"])
-def unfreeze_virtual_card(card_id: int):
+@app.post("/virtualcard/{card_id}/unfreeze", tags=["B3 — Payments"])
+def unfreeze_card(card_id: int):
+    """Unfreeze a virtual card."""
     try:
         result = run_query(
             "UPDATE Virtual_Cards SET status = 'active' WHERE card_id = %s RETURNING card_id",
@@ -139,9 +149,11 @@ def unfreeze_virtual_card(card_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/virtualcards/{card_id}", tags=["B3 — Payments"])
-def cancel_virtual_card(card_id: int):
+@app.delete("/virtualcard/{card_id}", tags=["B3 — Payments"])
+def cancel_card(card_id: int):
+    """Cancel (delete) a virtual card."""
     try:
+        # Unlink from subscription first
         run_query(
             "UPDATE Subscriptions SET virtual_card_id = NULL WHERE virtual_card_id = %s",
             params=(card_id,),
@@ -163,6 +175,7 @@ def cancel_virtual_card(card_id: int):
 
 @app.post("/payments/simulate", tags=["B3 — Payments"])
 def simulate_payment(req: SimulatePaymentRequest):
+    """Simulate a payment charge on a virtual card."""
     try:
         rows = run_query(
             "SELECT status FROM Virtual_Cards WHERE card_number = %s",
@@ -193,6 +206,7 @@ class SettleBillRequest(BaseModel):
 
 @app.get("/p2p/balances/{user_id}", tags=["P2P — Shared Bills"])
 def get_p2p_balances(user_id: int):
+    """Get all pending P2P balances for a user."""
     try:
         # Money others owe this user
         owes_you = run_query("""
@@ -237,6 +251,7 @@ def get_p2p_balances(user_id: int):
 
 @app.post("/p2p/create", tags=["P2P — Shared Bills"])
 def create_shared_bill(req: CreateBillRequest):
+    """Create a new shared bill / P2P request."""
     try:
         run_query(
             """INSERT INTO Shared_Bills (sub_id, payer_id, debtor_id, amount_owed, due_date, status)
@@ -568,6 +583,112 @@ def optimize_group_settlement(group_id: int):
 
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class SettleGroupRequest(BaseModel):
+    user_id: int
+
+@app.post("/settlement/settle/{group_id}", tags=["C++ Engine"])
+def settle_group_debts(group_id: int, req: SettleGroupRequest):
+    """
+    Settle all debts for a group. Runs the C++ engine to calculate optimal
+    transactions, records them in Settlement_History, and returns confirmation.
+    """
+    try:
+        # First get the optimized transactions
+        settlement = optimize_group_settlement(group_id)
+        transactions = settlement.get('transactions', [])
+
+        if not transactions:
+            return {"success": True, "message": "No debts to settle", "settled_count": 0}
+
+        # Get member name→id mapping
+        members = run_query("""
+            SELECT u.user_id, u.name FROM Group_Members gm
+            JOIN Users u ON gm.user_id = u.user_id
+            WHERE gm.group_id = %s
+            UNION
+            SELECT u.user_id, u.name FROM Subscription_Groups sg
+            JOIN Users u ON sg.creator_id = u.user_id
+            WHERE sg.group_id = %s
+        """, params=(group_id, group_id))
+        name_to_id = {m['name']: m['user_id'] for m in members}
+
+        # Record each transaction in Settlement_History
+        for t in transactions:
+            from_name = t['from_user']
+            to_name = t['to_user']
+            amount = t['amount']
+            from_id = name_to_id.get(from_name, 0)
+            to_id = name_to_id.get(to_name, 0)
+
+            run_query("""
+                INSERT INTO Settlement_History
+                    (group_id, from_user_id, to_user_id, from_user_name, to_user_name, amount)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, params=(group_id, from_id, to_id, from_name, to_name, amount), fetch=False)
+
+        return {
+            "success": True,
+            "message": f"Settled {len(transactions)} transaction(s)",
+            "settled_count": len(transactions),
+            "transactions": transactions
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/settlement/history/{user_id}", tags=["C++ Engine"])
+def get_settlement_history(user_id: int):
+    """
+    Get settlement history for a user — all groups where they were
+    involved as payer or receiver.
+    """
+    try:
+        rows = run_query("""
+            SELECT sh.settlement_id, sh.group_id, sh.from_user_name, sh.to_user_name,
+                   sh.amount, sh.settled_at, sh.from_user_id, sh.to_user_id,
+                   sg.name as group_name
+            FROM Settlement_History sh
+            LEFT JOIN Subscription_Groups sg ON sh.group_id = sg.group_id
+            WHERE sh.from_user_id = %s OR sh.to_user_id = %s
+            ORDER BY sh.settled_at DESC
+            LIMIT 50
+        """, params=(user_id, user_id))
+
+        return {
+            "user_id": user_id,
+            "history": [
+                {
+                    "settlement_id": r['settlement_id'],
+                    "group_id": r['group_id'],
+                    "group_name": r.get('group_name', 'Group'),
+                    "from_user": r['from_user_name'],
+                    "to_user": r['to_user_name'],
+                    "amount": float(r['amount']),
+                    "settled_at": str(r['settled_at']),
+                    "is_payer": r['from_user_id'] == user_id,
+                }
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/settlement/group-status/{group_id}", tags=["C++ Engine"])
+def get_group_settlement_status(group_id: int):
+    """Check if a group has been settled (any records in Settlement_History)."""
+    try:
+        rows = run_query("""
+            SELECT COUNT(*) as count FROM Settlement_History WHERE group_id = %s
+        """, params=(group_id,))
+        count = rows[0]['count'] if rows else 0
+        return {"group_id": group_id, "is_settled": count > 0, "settlement_count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

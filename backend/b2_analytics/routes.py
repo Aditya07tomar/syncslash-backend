@@ -1,3 +1,13 @@
+"""
+routes.py — FastAPI Router for the B2 Analytics Engine
+Endpoints:
+  GET /analytics/fatigue/{user_id}      → per-subscription fatigue scores
+  GET /analytics/ghosts/{user_id}       → ghost/zombie subscription list
+  GET /analytics/redundancy/{user_id}   → knowledge graph overlap analysis
+  GET /analytics/report/{user_id}       → monthly spending report by category
+  GET /analytics/graph/{user_id}        → full graph data for visualization
+"""
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from backend.db.connection import run_query
@@ -8,8 +18,17 @@ router = APIRouter(
 )
 
 
+# ──────────────────────────────────────────────────────────────
+# GET /analytics/fatigue/{user_id}
+# Calls the GenerateFatigueScore stored procedure
+# ──────────────────────────────────────────────────────────────
 @router.get("/fatigue/{user_id}")
 def get_fatigue_scores(user_id: int):
+    """
+    Returns a fatigue score for each of the user's active
+    subscriptions. Higher score = more wasteful.
+    This calls the PostgreSQL stored function directly.
+    """
     try:
         rows = run_query(
             "SELECT * FROM GenerateFatigueScore(%s)",
@@ -40,8 +59,16 @@ def get_fatigue_scores(user_id: int):
     }
 
 
+# ──────────────────────────────────────────────────────────────
+# GET /analytics/ghosts/{user_id}
+# Queries the ghost_subscriptions_view
+# ──────────────────────────────────────────────────────────────
 @router.get("/ghosts/{user_id}")
 def get_ghost_subscriptions(user_id: int):
+    """
+    Returns all ghost (zombie) subscriptions for a user.
+    A ghost subscription is one the user pays for but doesn't use.
+    """
     try:
         rows = run_query(
             "SELECT * FROM ghost_subscriptions_view WHERE user_id = %s",
@@ -66,8 +93,16 @@ def get_ghost_subscriptions(user_id: int):
     }
 
 
+# ──────────────────────────────────────────────────────────────
+# GET /analytics/redundancy/{user_id}
+# Detects overlapping subscriptions using PostgreSQL
+# ──────────────────────────────────────────────────────────────
 @router.get("/redundancy/{user_id}")
 def get_redundancy_analysis(user_id: int):
+    """
+    Detects redundant/overlapping subscriptions within the same
+    category using PostgreSQL GROUP BY. No Neo4j needed.
+    """
     try:
         # Find categories with 2+ active subscriptions
         rows = run_query("""
@@ -127,8 +162,16 @@ def get_redundancy_analysis(user_id: int):
     }
 
 
+# ──────────────────────────────────────────────────────────────
+# GET /analytics/report/{user_id}
+# Calls GenerateMonthlyReport stored procedure
+# ──────────────────────────────────────────────────────────────
 @router.get("/report/{user_id}")
 def get_monthly_report(user_id: int):
+    """
+    Returns a comprehensive monthly spending report grouped
+    by service category, including ghost counts and savings.
+    """
     try:
         rows = run_query(
             "SELECT * FROM GenerateMonthlyReport(%s)",
@@ -165,8 +208,17 @@ def get_monthly_report(user_id: int):
     }
 
 
+# ──────────────────────────────────────────────────────────────
+# GET /analytics/graph/{user_id}
+# Returns graph data built from PostgreSQL (no Neo4j needed)
+# ──────────────────────────────────────────────────────────────
 @router.get("/graph/{user_id}")
 def get_graph_data(user_id: int):
+    """
+    Builds a knowledge graph structure from PostgreSQL data.
+    Returns nodes (user, services, categories) and edges
+    for frontend visualization.
+    """
     try:
         # Get user info
         users = run_query("SELECT user_id, name FROM Users WHERE user_id = %s", params=(user_id,))
@@ -237,8 +289,16 @@ def get_graph_data(user_id: int):
     }
 
 
+# ──────────────────────────────────────────────────────────────
+# GET /analytics/graph/{user_id}/view
+# Returns an interactive HTML visualization of the knowledge graph
+# ──────────────────────────────────────────────────────────────
 @router.get("/graph/{user_id}/view", response_class=HTMLResponse)
 def view_graph_visualization(user_id: int):
+    """
+    Renders an interactive vis.js network diagram of the user's
+    Knowledge Graph directly in the browser.
+    """
     html_content = f"""
     <!DOCTYPE html>
     <html lang="en">

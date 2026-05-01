@@ -81,8 +81,21 @@ def init_database():
                 UNIQUE(group_id, user_id)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Settlement_History (
+                settlement_id SERIAL PRIMARY KEY,
+                group_id INT REFERENCES Subscription_Groups(group_id) ON DELETE CASCADE,
+                from_user_id INT REFERENCES Users(user_id),
+                to_user_id INT REFERENCES Users(user_id),
+                from_user_name VARCHAR(100),
+                to_user_name VARCHAR(100),
+                amount DECIMAL(10,2) NOT NULL,
+                settled_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
         print("✅ Groups tables ready")
+        print("✅ Settlement_History table ready")
 
         cur.close()
         conn.close()
